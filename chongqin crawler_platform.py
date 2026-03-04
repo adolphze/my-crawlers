@@ -8,8 +8,6 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
-import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill
 from datetime import datetime, timedelta
 
 # ===================== 配置参数 =====================
@@ -24,7 +22,6 @@ FIELDS = [
 PAGE_WAIT = 2
 MAX_RETRY = 3
 ELEMENT_WAIT_TIMEOUT = 15  # 元素加载超时时间，适配网络波动
-
 # 业务类型编码映射（从页面HTML提取，自动填充空字段）
 BUSINESS_TYPE_MAP = {
     "014001": "工程招投标",
@@ -41,7 +38,6 @@ BUSINESS_TYPE_MAP = {
     "014003": "机电设备",
     "014013": "诉讼资产交易"
 }
-
 # 信息类型编码映射
 INFO_TYPE_MAP = {
     "001": "招标公告",
@@ -197,9 +193,9 @@ def has_next_page(driver):
         print(f"⚠️ 检测下一页失败: {e}")
         return None
 
-# ===================== Excel导出函数 =====================
-def export_to_excel(data, filename=None):
-    """导出数据到Excel，统一保存到data/目录，适配GitHub Actions"""
+# ===================== JSON导出函数 =====================
+def export_to_json(data, filename=None):
+    """导出数据到JSON文件，统一保存到data/目录，适配GitHub Actions，中文无乱码"""
     if not data:
         print("❌ 无数据可导出")
         return
@@ -207,40 +203,16 @@ def export_to_excel(data, filename=None):
     # 生成默认文件名
     if not filename:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"重庆市公共资源交易数据_{timestamp}.xlsx"
+        filename = f"重庆市公共资源交易数据_{timestamp}.json"
     
     # 确保data目录存在
     os.makedirs("data", exist_ok=True)
     filepath = os.path.join("data", filename)
     
-    # 创建工作簿与工作表
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "爬取数据"
+    # 写入JSON文件，格式化输出，中文正常显示
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
     
-    # 设置表头样式
-    header_font = Font(name="微软雅黑", size=12, bold=True, color="FFFFFF")
-    header_alignment = Alignment(horizontal="center", vertical="center")
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    
-    # 写入表头
-    for col, field in enumerate(FIELDS, 1):
-        cell = ws.cell(row=1, column=col, value=field)
-        cell.font = header_font
-        cell.alignment = header_alignment
-        cell.fill = header_fill
-    
-    # 写入数据行
-    for row, item in enumerate(data, 2):
-        for col, field in enumerate(FIELDS, 1):
-            ws.cell(row=row, column=col, value=item[field])
-    
-    # 自动调整列宽
-    for col in range(1, len(FIELDS) + 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 25
-    
-    # 保存文件
-    wb.save(filepath)
     print(f"✅ 数据已导出到: {filepath}")
     return filepath
 
@@ -250,15 +222,18 @@ def main():
     print("📢 重庆市公共资源交易平台全自动爬虫启动")
     print("="*60)
     
-    # 计算北京时间前一天日期（适配GitHub Actions UTC时区）
+    # 计算北京时间（适配GitHub Actions UTC时区）
     beijing_now = datetime.utcnow() + timedelta(hours=8)
-    target_date = (beijing_now - timedelta(days=1)).strftime("%Y-%m-%d")
+    target_date = (beijing_now - timedelta(days=1)).strftime("%Y-%m-%d")  # 目标爬取：前一天数据
+    stop_date = (beijing_now - timedelta(days=2)).strftime("%Y-%m-%d")    # 停止触发：前天数据
     print(f"📅 目标爬取日期（前一天）: {target_date}")
+    print(f"🛑 停止触发日期（前天）: {stop_date}")
     
     all_data = []
     current_page_num = 1
     consecutive_failures = 0
     driver = None
+    crawl_stop_flag = False  # 爬取停止标记
     
     try:
         # 1. 初始化浏览器
@@ -274,7 +249,7 @@ def main():
         )
         print("✅ 页面核心元素加载完成")
         
-        # 4. 自动点击「近三天」按钮，缩小数据范围
+        # 4. 自动点击「近三天」按钮，缩小数据范围，匹配停止逻辑
         try:
             three_days_btn = WebDriverWait(driver, ELEMENT_WAIT_TIMEOUT).until(
                 EC.element_to_be_clickable((By.XPATH, "//div[@id='day']//a[@value='2']"))
@@ -293,7 +268,7 @@ def main():
         except Exception as e:
             print(f"⚠️ 点击筛选按钮失败，将使用全量数据过滤: {e}")
         
-        # 5. 循环爬取所有页面
+        # 5. 循环爬取页面，新增日期触发停止逻辑
         while True:
             print(f"\n🚀 正在爬取第 {current_page_num} 页...")
             
@@ -312,11 +287,18 @@ def main():
                     print(f"⚠️ 解析第 {current_page_num} 页失败，重试 ({retry+1}/{MAX_RETRY}): {e}")
                     time.sleep(PAGE_WAIT)
             
-            # 过滤出目标日期（前一天）的数据
+            # 核心停止逻辑：检查当前页是否包含前天的停止日期数据
             if page_raw_data:
+                # 先完成当前页目标数据采集
                 target_data = [item for item in page_raw_data if item["发布日期"] == target_date]
                 all_data.extend(target_data)
                 print(f"🔍 本页共 {len(page_raw_data)} 条，目标日期({target_date})数据 {len(target_data)} 条")
+                
+                # 检测到停止日期，标记终止，完成当前页后不再翻页
+                has_stop_date = any(item["发布日期"] == stop_date for item in page_raw_data)
+                if has_stop_date:
+                    print(f"🛑 检测到停止日期({stop_date})数据，完成当前页采集后终止爬取")
+                    crawl_stop_flag = True
             else:
                 consecutive_failures += 1
                 print(f"❌ 第 {current_page_num} 页多次尝试后仍无数据")
@@ -325,8 +307,11 @@ def main():
             if consecutive_failures >= MAX_RETRY:
                 print("🔚 连续多次无数据，终止爬取")
                 break
+            if crawl_stop_flag:
+                print("🔚 已触发日期停止规则，终止爬取")
+                break
             
-            # 检查是否有下一页
+            # 未触发停止，检查并跳转下一页
             next_btn = has_next_page(driver)
             if next_btn:
                 try:
@@ -345,16 +330,16 @@ def main():
                 print("🔚 已爬取到最后一页")
                 break
         
-        # 6. 导出最终数据
+        # 6. 导出最终JSON数据
         print(f"\n📊 爬取完成！共爬取 {current_page_num} 页，累计获取 {len(all_data)} 条目标日期({target_date})数据")
-        export_to_excel(all_data)
+        export_to_json(all_data)
         
     except Exception as e:
         print(f"❌ 程序异常: {e}")
         # 异常时自动备份已爬取的数据
         if 'all_data' in locals() and all_data:
-            backup_filename = f"重庆市公共资源交易数据_异常备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-            export_to_excel(all_data, backup_filename)
+            backup_filename = f"重庆市公共资源交易数据_异常备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            export_to_json(all_data, backup_filename)
     finally:
         if driver:
             print("\n🔌 关闭浏览器")
@@ -362,6 +347,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
