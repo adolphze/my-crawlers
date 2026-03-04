@@ -207,14 +207,14 @@ def go_to_page_by_input(driver, page_num):
         print(f"⚠️ 跳转至第 {page_num} 页失败: {e}")
         return False
 
-# ===================== JSON导出函数 =====================
+# ===================== JSON导出函数（替换原Excel导出）=====================
 def export_to_json(data, filename=None):
-    """导出数据到JSON文件，统一保存到data/目录，适配GitHub Actions，中文无乱码"""
+    """导出数据到JSON文件，统一保存到data/目录，适配GitHub Actions，中文不转义"""
     if not data:
         print("❌ 无数据可导出")
         return
     
-    # 生成默认文件名
+    # 生成默认文件名，带时间戳避免覆盖
     if not filename:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"贵州省公告公示数据_{timestamp}.json"
@@ -223,23 +223,25 @@ def export_to_json(data, filename=None):
     os.makedirs("data", exist_ok=True)
     filepath = os.path.join("data", filename)
     
-    # 写入JSON文件，格式化输出，保证中文正常显示
+    # 写入JSON文件，格式化输出，中文正常显示
     with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=4)
     
-    print(f"✅ 数据已导出到: {filepath}")
+    print(f"✅ JSON数据已导出到: {filepath}")
     return filepath
 
-# ===================== 主程序（全自动运行，无人工干预）=====================
+# ===================== 主程序（新增停止条件+JSON导出）=====================
 def main():
     print("="*60)
-    print("📢 贵州省公共资源交易平台全自动爬虫启动")
+    print("📢 贵州省公共资源交易平台全自动爬虫启动（新增日期停止条件）")
     print("="*60)
     
     # 计算北京时间（适配GitHub Actions UTC时区）
     beijing_now = datetime.utcnow() + timedelta(hours=8)
-    target_date = (beijing_now - timedelta(days=1)).strftime("%Y-%m-%d")  # 目标爬取：前一天数据
-    stop_date = (beijing_now - timedelta(days=2)).strftime("%Y-%m-%d")    # 停止触发：前天数据
+    # 目标爬取日期：前一天
+    target_date = (beijing_now - timedelta(days=1)).strftime("%Y-%m-%d")
+    # 停止触发日期：前天，页面出现此日期数据立即终止爬取
+    stop_date = (beijing_now - timedelta(days=2)).strftime("%Y-%m-%d")
     print(f"📅 目标爬取日期（前一天）: {target_date}")
     print(f"🛑 停止触发日期（前天）: {stop_date}")
     
@@ -285,8 +287,12 @@ def main():
         # 5. 获取总页数
         total_pages = get_total_pages(driver)
         
-        # 6. 循环爬取页面，新增日期触发停止逻辑
+        # 6. 循环爬取页面，新增停止条件判断
         while True:
+            # 触发停止标记，直接终止循环
+            if crawl_stop_flag:
+                break
+            
             print(f"\n🚀 正在爬取第 {current_page_num} 页...")
             
             # 解析当前页，带重试机制
@@ -304,26 +310,33 @@ def main():
                     print(f"⚠️ 解析第 {current_page_num} 页失败，重试 ({retry+1}/{MAX_RETRY}): {e}")
                     time.sleep(PAGE_WAIT)
             
-            # 核心逻辑：先完成当前页目标数据采集，再判断停止规则
-            if page_raw_data:
-                # 过滤目标日期数据并汇总
-                target_data = [item for item in page_raw_data if item["发布日期"] == target_date]
-                all_data.extend(target_data)
-                print(f"🔍 本页共 {len(page_raw_data)} 条，目标日期({target_date})数据 {len(target_data)} 条")
-                
-                # 检测到停止日期，标记终止，完成当前页后不再翻页
-                has_stop_date = any(item["发布日期"] == stop_date for item in page_raw_data)
-                if has_stop_date:
-                    print(f"🛑 检测到停止日期({stop_date})数据，完成当前页采集后终止爬取")
-                    crawl_stop_flag = True
-            else:
+            # 处理空数据情况
+            if not page_raw_data:
                 consecutive_failures += 1
                 print(f"❌ 第 {current_page_num} 页多次尝试后仍无数据")
+                if consecutive_failures >= MAX_RETRY:
+                    print("🔚 连续多次无数据，终止爬取")
+                    break
+                continue
             
-            # 终止条件判断（停止规则优先级最高）
-            if crawl_stop_flag:
-                print("🔚 已触发日期停止规则，终止爬取")
+            # ========== 核心新增：停止条件判断 ==========
+            # 检查当前页是否包含停止日期（前天）的数据
+            has_stop_date = any(item["发布日期"] == stop_date for item in page_raw_data)
+            if has_stop_date:
+                print(f"🛑 检测到前天({stop_date})数据，触发停止条件，保存当前页有效数据后终止爬取")
+                # 过滤当前页符合目标日期的数据，加入总数据
+                target_data = [item for item in page_raw_data if item["发布日期"] == target_date]
+                all_data.extend(target_data)
+                print(f"🔍 本页共 {len(page_raw_data)} 条，目标日期({target_date})有效数据 {len(target_data)} 条")
+                crawl_stop_flag = True
                 break
+            
+            # 无停止日期，正常过滤目标数据
+            target_data = [item for item in page_raw_data if item["发布日期"] == target_date]
+            all_data.extend(target_data)
+            print(f"🔍 本页共 {len(page_raw_data)} 条，目标日期({target_date})有效数据 {len(target_data)} 条")
+            
+            # 原有终止条件：连续失败/到达总页数
             if consecutive_failures >= MAX_RETRY:
                 print("🔚 连续多次无数据，终止爬取")
                 break
@@ -360,8 +373,11 @@ def main():
                 break
         
         # 7. 导出最终JSON数据
-        print(f"\n📊 爬取完成！共爬取 {current_page_num} 页，累计获取 {len(all_data)} 条目标日期({target_date})数据")
-        export_to_json(all_data)
+        print(f"\n📊 爬取完成！共爬取 {current_page_num} 页，累计获取 {len(all_data)} 条目标日期({target_date})有效数据")
+        if all_data:
+            export_to_json(all_data)
+        else:
+            print("❌ 无有效目标数据，不生成导出文件")
         
     except Exception as e:
         print(f"❌ 程序异常: {e}")
