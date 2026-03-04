@@ -1,0 +1,66 @@
+name: 手动运行单个脚本
+on:
+  workflow_dispatch:
+    inputs:
+      script_name:
+        description: "选择要运行的爬虫脚本"
+        required: true
+        type: choice
+        options:
+          - "sichuan crawler_platform.py"
+          - "chongqin crawler_platform.py"
+          - "guizhou crawler_platform.py"
+          - "quanguo crawler_platform.py"
+      # 可选：添加是否上传结果文件的选项
+      upload_artifacts:
+        description: "是否上传生成的 data/logs 文件"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"  # 建议与本地环境版本一致
+          cache: "pip"  # 缓存 pip 依赖，加速安装
+
+      - name: 安装项目依赖
+        run: |
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # 若没有 requirements.txt，手动安装核心依赖（根据实际情况调整）
+            pip install selenium beautifulsoup4 webdriver-manager
+          fi
+
+      - name: 安装 Edge 浏览器（无头模式必需）
+        run: |
+          # 安装 Microsoft Edge
+          sudo apt-get update
+          sudo apt-get install -y wget
+          wget -q https://packages.microsoft.com/keys/microsoft.asc -O- | sudo apt-key add -
+          sudo add-apt-repository "deb [arch=amd64] https://packages.microsoft.com/repos/edge stable main"
+          sudo apt-get update
+          sudo apt-get install -y microsoft-edge-stable
+
+      - name: 运行选中的脚本
+        run: |
+          echo "正在运行脚本: ${{ github.event.inputs.script_name }}"
+          python "${{ github.event.inputs.script_name }}"
+
+      - name: 上传结果文件（可选）
+        if: ${{ github.event.inputs.upload_artifacts == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: script-outputs
+          path: |
+            data/
+            crawler_logs/
+          retention-days: 7  # 保留 7 天
