@@ -1,14 +1,13 @@
 import json
 import time
 import re
+import os
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
-import openpyxl
-from openpyxl.styles import Font, Alignment, PatternFill
 from datetime import datetime, timedelta
 
 # ===================== 配置参数 =====================
@@ -26,17 +25,21 @@ ELEMENT_WAIT_TIMEOUT = 10
 def init_driver():
     """初始化无头Edge浏览器（适用于GitHub Actions）"""
     options = Options()
-    options.add_argument('--headless')
+    options.add_argument('--headless=new')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
     options.add_argument('--disable-gpu')
     options.add_argument('--window-size=1920,1080')
-    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0')
+    # 反爬优化：隐藏自动化特征
+    options.add_argument('--disable-blink-features=AutomationControlled')
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0')
     driver = webdriver.Edge(options=options)
-    print("✅ 无头Edge浏览器已启动")
+    print("✅ 无头Edge浏览器已启动，反爬配置已加载")
     return driver
 
-# ===================== 解析函数（保持不变）=====================
+# ===================== 解析函数（保持原逻辑不变，确保数据兼容性）=====================
 def parse_notice_item(notice_soup):
     """解析单个公告条目"""
     item = {field: "" for field in FIELDS}
@@ -131,46 +134,30 @@ def has_next_page(driver):
         print(f"⚠️ 检测下一页失败: {e}")
         return None
 
-def export_to_excel(data, filename=None):
-    """导出数据到Excel"""
+# ===================== JSON导出函数（替换原Excel导出）=====================
+def export_to_json(data, filename=None):
+    """导出数据到JSON文件，适配GitHub Actions，中文无乱码，自动创建目录"""
     if not data:
         print("❌ 无数据可导出")
         return
     
+    # 生成默认文件名，与原命名规范保持一致
     if not filename:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"四川省公共资源交易数据_{timestamp}.xlsx"
+        filename = f"四川省公共资源交易数据_{timestamp}.json"
     
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "爬取数据"
-    
-    header_font = Font(name="微软雅黑", size=12, bold=True, color="FFFFFF")
-    header_alignment = Alignment(horizontal="center", vertical="center")
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    
-    for col, field in enumerate(FIELDS, 1):
-        cell = ws.cell(row=1, column=col, value=field)
-        cell.font = header_font
-        cell.alignment = header_alignment
-        cell.fill = header_fill
-    
-    for row, item in enumerate(data, 2):
-        for col, field in enumerate(FIELDS, 1):
-            ws.cell(row=row, column=col, value=item[field])
-    
-    for col in range(1, len(FIELDS) + 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 25
-    
-    # 确保输出目录存在（GitHub Actions中需要）
-    import os
+    # 确保data目录存在
     os.makedirs("data", exist_ok=True)
     filepath = os.path.join("data", filename)
-    wb.save(filepath)
+    
+    # 写入JSON文件，格式化输出，保证中文正常显示
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    
     print(f"✅ 数据已导出到: {filepath}")
     return filepath
 
-# ===================== 主程序（使用“近一天”筛选 + 日期过滤）=====================
+# ===================== 主程序（新增日期停止逻辑）=====================
 def main():
     try:
         driver = init_driver()
@@ -182,13 +169,15 @@ def main():
             EC.presence_of_element_located((By.ID, "transactionInfo"))
         )
         
-        # ===== 计算北京时间昨天的日期 =====
+        # ===== 计算北京时间日期 =====
         # GitHub Actions 默认时区为 UTC，转换为北京时间（UTC+8）
         beijing_now = datetime.utcnow() + timedelta(hours=8)
-        yesterday = (beijing_now - timedelta(days=1)).strftime("%Y-%m-%d")
-        print(f"📅 目标日期（昨天）: {yesterday}")
+        target_date = (beijing_now - timedelta(days=1)).strftime("%Y-%m-%d")  # 目标爬取：前一天（昨天）
+        stop_date = (beijing_now - timedelta(days=2)).strftime("%Y-%m-%d")    # 停止触发：前天
+        print(f"📅 目标爬取日期（昨天）: {target_date}")
+        print(f"🛑 停止触发日期（前天）: {stop_date}")
         
-        # ===== 点击“近一天”按钮 =====
+        # ===== 点击“近一天”按钮，缩小数据范围 =====
         try:
             pre_oneday_btn = WebDriverWait(driver, ELEMENT_WAIT_TIMEOUT).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, "dd[data-id='preOneday']"))
@@ -213,21 +202,22 @@ def main():
             time.sleep(1)
         except Exception as e:
             print(f"⚠️ 点击“近一天”失败，将使用当前页面继续爬取: {e}")
-            # 失败时继续，可能爬取的是默认数据
+            # 失败时继续，不中断程序
         
         # 获取总页数
         total_pages = get_total_pages(driver)
         if not total_pages:
-            print("⚠️ 无法获取总页数，将使用下一页模式")
+            print("⚠️ 无法获取总页数，将使用下一页兜底模式")
         
         all_data = []
         current_page_num = 1
         consecutive_failures = 0
+        crawl_stop_flag = False  # 日期触发停止标记
         
         while True:
             print(f"\n🚀 正在爬取第 {current_page_num} 页...")
             
-            # 解析当前页（带重试）
+            # 解析当前页（带重试机制）
             page_raw_data = []
             for retry in range(MAX_RETRY):
                 try:
@@ -242,67 +232,70 @@ def main():
                     print(f"⚠️ 解析第 {current_page_num} 页失败，重试 ({retry+1}/{MAX_RETRY}): {e}")
                     time.sleep(PAGE_WAIT)
             
-            # 过滤出发布日期为昨天的数据
+            # 核心逻辑1：先完成当前页目标数据采集
             if page_raw_data:
-                yesterday_data = [item for item in page_raw_data if item["发布日期"] == yesterday]
-                all_data.extend(yesterday_data)
-                print(f"🔍 本页共 {len(page_raw_data)} 条，其中昨天({yesterday})的有 {len(yesterday_data)} 条")
+                # 过滤目标日期数据并汇总
+                target_data = [item for item in page_raw_data if item["发布日期"] == target_date]
+                all_data.extend(target_data)
+                print(f"🔍 本页共 {len(page_raw_data)} 条，目标日期({target_date})数据 {len(target_data)} 条")
+                
+                # 核心逻辑2：检测停止日期，触发则标记终止（完成当前页后不再翻页）
+                has_stop_date = any(item["发布日期"] == stop_date for item in page_raw_data)
+                if has_stop_date:
+                    print(f"🛑 检测到停止日期({stop_date})数据，完成当前页采集后终止爬取")
+                    crawl_stop_flag = True
             else:
                 consecutive_failures += 1
                 print(f"❌ 第 {current_page_num} 页多次尝试后仍无数据")
             
-            # 终止条件判断
-            if total_pages:
-                if current_page_num >= total_pages:
-                    print("🔚 已到达总页数")
-                    break
-                
-                current_page_num += 1
-                success = False
-                
-                # 尝试点击下一页
-                next_btn = has_next_page(driver)
-                if next_btn:
-                    try:
-                        next_btn.click()
-                        time.sleep(PAGE_WAIT)
-                        WebDriverWait(driver, ELEMENT_WAIT_TIMEOUT).until(
-                            EC.presence_of_element_located((By.ID, "transactionInfo"))
-                        )
-                        success = True
-                    except Exception as e:
-                        print(f"⚠️ 点击下一页失败: {e}")
-                
-                # 备用：通过输入框跳转
-                if not success:
-                    print(f"🔄 尝试通过输入框直接跳转至第 {current_page_num} 页...")
-                    success = go_to_page_by_input(driver, current_page_num)
-                
-                if not success:
-                    print(f"❌ 无法翻至第 {current_page_num} 页，爬取终止")
-                    break
-            else:
-                # 未知总页数模式
-                next_btn = has_next_page(driver)
-                if next_btn and consecutive_failures < MAX_RETRY:
-                    try:
-                        next_btn.click()
-                        time.sleep(PAGE_WAIT)
-                        current_page_num += 1
-                    except Exception as e:
-                        print(f"⚠️ 点击下一页失败: {e}")
-                        break
-                else:
-                    print("🔚 已爬取到最后一页或连续失败次数过多")
-                    break
+            # 终止条件判断（日期停止规则优先级最高）
+            if crawl_stop_flag:
+                print("🔚 已触发日期停止规则，终止爬取")
+                break
+            if consecutive_failures >= MAX_RETRY:
+                print("🔚 连续多次无数据，终止爬取")
+                break
+            if total_pages and current_page_num >= total_pages:
+                print("🔚 已到达总页数，爬取完成")
+                break
+            
+            # 翻页逻辑（与原代码完全兼容，保留双方案兜底）
+            current_page_num += 1
+            flip_success = False
+            
+            # 方式1：点击下一页
+            next_btn = has_next_page(driver)
+            if next_btn:
+                try:
+                    next_btn.click()
+                    time.sleep(PAGE_WAIT)
+                    WebDriverWait(driver, ELEMENT_WAIT_TIMEOUT).until(
+                        EC.presence_of_element_located((By.ID, "transactionInfo"))
+                    )
+                    flip_success = True
+                except Exception as e:
+                    print(f"⚠️ 点击下一页失败: {e}")
+            
+            # 方式2：输入框跳转兜底
+            if not flip_success and total_pages:
+                print(f"🔄 尝试通过输入框直接跳转至第 {current_page_num} 页...")
+                flip_success = go_to_page_by_input(driver, current_page_num)
+            
+            # 两种方式都失败，终止爬取
+            if not flip_success:
+                print(f"❌ 无法翻至第 {current_page_num} 页，爬取终止")
+                break
         
-        print(f"\n📊 爬取完成！共爬取 {current_page_num} 页，累计获取 {len(all_data)} 条昨天（{yesterday}）的数据")
-        export_to_excel(all_data)
+        # 导出最终JSON数据
+        print(f"\n📊 爬取完成！共爬取 {current_page_num} 页，累计获取 {len(all_data)} 条目标日期({target_date})的数据")
+        export_to_json(all_data)
         
     except Exception as e:
         print(f"❌ 程序异常: {e}")
+        # 异常时自动备份已爬取数据，杜绝数据丢失
         if 'all_data' in locals() and all_data:
-            export_to_excel(all_data, f"四川省公共资源交易数据_异常备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+            backup_filename = f"四川省公共资源交易数据_异常备份_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            export_to_json(all_data, backup_filename)
     finally:
         if 'driver' in locals():
             print("\n🔌 关闭浏览器")
@@ -310,6 +303,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
