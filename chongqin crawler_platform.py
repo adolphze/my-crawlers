@@ -388,7 +388,6 @@ def main():
         # 6. 导出最终数据
         print(f"\n📊 爬取完成！共爬取 {current_page_num} 页，累计获取 {len(all_data)} 条目标日期({target_date})有效数据")
         if all_data:
-            export_to_excel(all_data)
             export_to_json(all_data)  # 新增JSON导出
         else:
             print("❌ 无有效目标数据，不生成导出文件")
@@ -409,3 +408,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
