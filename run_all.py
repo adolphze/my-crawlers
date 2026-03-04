@@ -24,7 +24,7 @@ LOG_DIR = "crawler_logs"
 # Python解释器路径（自动获取当前环境，避免环境冲突）
 PYTHON_EXEC = sys.executable
 # 单个爬虫最大运行超时时间（秒），避免卡死
-SCRIPT_TIMEOUT = 600
+SCRIPT_TIMEOUT = 1800
 # 多进程打印锁（解决输出覆盖核心问题）
 PRINT_LOCK = multiprocessing.Lock()
 
@@ -250,3 +250,4 @@ if __name__ == "__main__":
     
     # 启动主控程序
     main()
+
